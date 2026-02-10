@@ -1,0 +1,1110 @@
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.oxml.xmlchemy import OxmlElement
+from pptx.enum.text import PP_ALIGN, MSO_VERTICAL_ANCHOR, MSO_ANCHOR
+from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
+
+class SlideTheme:
+    DARK_BLUE = RGBColor(0, 32, 96)
+    WHITE_RGB = RGBColor(255, 255, 255)
+    BLACK_RGB = RGBColor(0, 0, 0)   
+    BORDER_WHITE = ("FFFFFF", "12700") # 白線
+    BORDER_GRAY  = ("D9D9D9", "12700") # 薄いグレー線（ボディ下線用）
+    
+    
+    
+
+# --- XML操作用ヘルパー関数 ---
+def SubElement(parent, tagname, **kwargs):
+    element = OxmlElement(tagname)
+    element.attrib.update(kwargs)
+    parent.append(element)
+    return element
+
+def set_custom_border(cell, top=None, bottom=None, left=None, right=None):
+    """
+    セルの上下左右の罫線を個別に制御する関数
+    引数には (色Hex, 太さEMU) のタプルを渡す。Noneの場合は線を削除する。
+    例: bottom=("000000", "12700") -> 下に黒い線を引く
+    """
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    
+    # マッピング: (引数の値, XMLタグ名)
+    sides = [
+        (bottom, 'a:lnB'),
+        (top,    'a:lnT'),
+        (right,  'a:lnR'),
+        (left,   'a:lnL')
+    ]
+
+    for setting, tag_name in sides:
+        # 1. まず既存の設定を削除（リセット）
+        for child in tcPr.getchildren():
+            if child.tag.endswith(tag_name.split(':')[1]):
+                tcPr.remove(child)
+
+        # 2. 設定値がある場合のみ線を作成
+        if setting:
+            color_hex, width_str = setting
+            
+            ln = OxmlElement(tag_name)
+            ln.set('w', str(width_str))
+            ln.set('cap', 'flat')
+            ln.set('cmpd', 'sng')
+            ln.set('algn', 'ctr')
+
+            solidFill = SubElement(ln, 'a:solidFill')
+            SubElement(solidFill, 'a:srgbClr', val=color_hex)
+            SubElement(ln, 'a:prstDash', val='solid')
+            SubElement(ln, 'a:round')
+            SubElement(ln, 'a:headEnd', type='none', w='med', len='med')
+            SubElement(ln, 'a:tailEnd', type='none', w='med', len='med')
+
+            # 3. tcPrの先頭に挿入（背景色より前に定義するため）
+            tcPr.insert(0, ln)
+
+def create_table(slide, data, theme):
+    
+    _create_title_and_takeaway(slide, data)
+    
+    table_data = data.get("table",[])
+    
+    start_y = Inches(2.0) if data.get("takeaway", "") else Inches(1.5)
+
+    # 表の定義
+    row_num, col_num = len(table_data), len(table_data[0])
+    table_height = max(row_num * 0.5, 3)
+    if  col_num >= 4:
+        left, top, width, height = Inches(0.5), start_y, Inches(8.5), Inches(table_height)
+    else:
+        left, top, width, height = Inches(1), start_y, Inches(8), Inches(table_height)
+    shape = slide.shapes.add_table(row_num, col_num, left, top, width, height)
+    table = shape.table
+
+    # デフォルトスタイル解除
+    table.table_style_id = None
+
+    for r in range(row_num):
+        for c in range(col_num):
+            cell = table.cell(r, c)
+            cell.text = table_data[r][c]
+            paragraph = cell.text_frame.paragraphs[0]
+            
+            # --- 1. 背景色と文字色の設定 ---
+            cell.fill.solid()
+            
+            if r == 0:
+                # ヘッダー行
+                cell.fill.fore_color.rgb = theme.DARK_BLUE
+                paragraph.font.color.rgb = theme.WHITE_RGB
+                paragraph.font.bold = True
+                
+                # --- 2A. ヘッダーの罫線ロジック ---
+                # 「縦の白線あり。上下なし。右端左端は縦線なし」
+                
+                # 左端: なし
+                # 右端: なし
+                # それ以外: 右側に白線を引く（隣のセルの左線代わりになる）
+                
+                right_border = None
+                if c < col_num - 1: # 最後の列でなければ
+                    right_border = theme.BORDER_WHITE
+                
+                set_custom_border(cell, 
+                                  top=None, 
+                                  bottom=None, 
+                                  left=None, 
+                                  right=right_border)
+
+            else:
+                # ボディ行（2行目以降）
+                cell.fill.fore_color.rgb = theme.WHITE_RGB
+                paragraph.font.color.rgb = theme.BLACK_RGB
+                
+                # --- 2B. ボディの罫線ロジック ---
+                # 「縦線なし。下線のみあり」
+                
+                set_custom_border(cell, 
+                                  top=None, 
+                                  bottom=theme.BORDER_GRAY, # ここで下線を設定
+                                  left=None, 
+                                  right=None)
+
+        
+def _create_title_and_takeaway(slide, data):
+    """
+    スライドのタイトルとTakeaway (Subtitle/Body) を設定するヘルパー関数
+    """
+    # 1. 既存のタイトルとTakeaway (Subtitle/Body) を更新
+    # ---------------------------------------------------------
+    if slide.shapes.title:
+        slide.shapes.title.text = data.get("slide_title", "")
+        # タイトルのフォント設定（必要に応じて調整）
+        for paragraph in slide.shapes.title.text_frame.paragraphs:
+            paragraph.font.size = Pt(24)
+            paragraph.font.bold = True
+            paragraph.alignment = PP_ALIGN.LEFT
+
+    # Takeaway (通常 placeholders[1] または 2番目のシェイプと仮定)
+    # テンプレートによってインデックスが異なるため、適宜調整してください
+    if len(slide.placeholders) > 1:
+        takeaway_shape = slide.placeholders[1]
+        takeaway_shape.text = data.get("takeaway", "")
+        
+        # Takeawayの書式設定
+        for paragraph in takeaway_shape.text_frame.paragraphs:
+            paragraph.font.size = Pt(12)
+            paragraph.alignment = PP_ALIGN.LEFT
+
+
+def create_listup_slide(slide, data, theme):
+    """
+    辞書データを受け取り、スライドのテキスト更新とリストコンテンツの描画を行う関数
+    
+    Args:
+        slide (pptx.slide.Slide): 編集対象のスライドオブジェクト
+
+        data (dict): {
+            "slide_title": str,
+            "takeaway": str,
+            "list": [{"title": str, "description": str}, ...]
+        }
+    """
+    
+    # 1. タイトルとTakeawayの設定
+    # ---------------------------------------------------------
+    _create_title_and_takeaway(slide, data)
+            
+    # 2. コンテンツ（リスト部分）の描画
+    # ---------------------------------------------------------
+    contents = data.get("list", [])
+    if not contents:
+        return
+
+    count = len(contents)
+    
+    start_y = Inches(2.0) if data.get("takeaway", "") else Inches(1.5)
+    
+    bottom_margin = Inches(0.3)
+    slide_height = Inches(5.625)
+    available_height = slide_height - start_y - bottom_margin
+    
+    # アイテムごとの高さを計算（数に応じて自動調整）
+    item_height = available_height / count
+    # ただし、間隔が空きすぎないように上限を設ける
+    if item_height > Inches(1.2):
+        item_height = Inches(1.2)
+
+    # テキストの位置設定
+    # icon_left = Inches(1.2)
+    text_left = Inches(1.2)
+    text_width = Inches(7.5)
+
+    for i, item in enumerate(contents):
+        title_text = item.get("title", "")
+        desc_text = item.get("description", "")
+        
+        current_y = start_y + (i * item_height)
+
+        # コンテンツのテキストボックス作成
+        # タイトルと説明を1つのテキストボックスに入れる
+        textbox = slide.shapes.add_textbox(
+            text_left, 
+            current_y, 
+            text_width, 
+            item_height
+        )
+        tf = textbox.text_frame
+        tf.word_wrap = True
+
+        # タイトル部分
+        p_title = tf.paragraphs[0]
+        p_title.text = title_text
+        p_title.font.bold = True
+        p_title.font.size = Pt(14)
+        p_title.font.color.rgb = RGBColor(50, 50, 50) # 濃いグレー/黒
+
+        # 説明部分
+        p_desc = tf.add_paragraph()
+        p_desc.text = desc_text
+        p_desc.font.size = Pt(10)
+        p_desc.font.color.rgb = RGBColor(100, 100, 100) # 薄いグレー
+        p_desc.space_before = Pt(3) # タイトルとの間隔
+
+import os
+
+def create_listup_with_icon_slide(slide, data, theme):
+    """
+    data = {
+      "slide_title": str,
+      "takeaway": str,
+      "list": [{"icon": str, "title": str, "description": str}, ...],
+      # 任意: "icon_dir": "./icons"
+    }
+    """
+    # 1) タイトルとTakeaway
+    _create_title_and_takeaway(slide, data)
+
+    contents = data.get("list", [])
+    if not contents:
+        return
+
+    # アイコンディレクトリ
+    icon_dir = data.get("icon_dir", "./icons")
+
+    # 2) レイアウト（スライドサイズに追従）
+    slide_w = Inches(10.0)  
+    slide_h = Inches(5.625)
+
+    left_margin = Inches(0.7)
+    right_margin = Inches(0.7)
+    bottom_margin = Inches(0.4)
+
+    # Takeawayの有無で開始Yを調整（テンプレに合わせて微調整OK）
+    icon_top = Inches(2.0) if data.get("takeaway", "") else Inches(1.5)
+
+    count = len(contents)
+    available_w = slide_w - left_margin - right_margin
+    col_w = available_w / max(count, 1)
+
+    # サイズ（カラム幅に応じて自動調整）
+    icon_w = min(Inches(0.8), col_w * 0.55)
+    gap_icon_title = Inches(0.25)
+    title_h = Inches(0.45)
+    gap_title_desc = Inches(0.08)
+
+    # 説明枠は残り高さを見て決める
+    desc_top = icon_top + icon_w + gap_icon_title + title_h + gap_title_desc
+    desc_h = max(Inches(0.9), (slide_h - desc_top - bottom_margin))
+
+    # 色（画像っぽい青）
+    title_blue = RGBColor(0, 155, 225)
+    title_gray = RGBColor(50, 50, 50)
+    desc_gray = RGBColor(60, 60, 60)
+
+    for i, item in enumerate(contents):
+        icon_name = (item.get("icon") or "").strip()
+        title_text = item.get("title", "")
+        desc_text = item.get("description", "")
+
+        col_left = left_margin + col_w * i
+        col_center_x = col_left + col_w / 2
+
+        # --- アイコン ---
+        if icon_name:
+            icon_path = os.path.join(icon_dir, f"{icon_name}.png")
+            if os.path.exists(icon_path):
+                slide.shapes.add_picture(
+                    icon_path,
+                    col_center_x - (icon_w / 2),
+                    icon_top,
+                    width=icon_w
+                )
+            # 見つからない場合はスキップ（必要ならログ出力など）
+
+        # テキストボックス幅（カラム内に少し余白）
+        box_w = col_w - Inches(0.15)
+        box_left = col_center_x - (box_w / 2)
+
+        # --- タイトル（青・太字・中央） ---
+        title_tb = slide.shapes.add_textbox(
+            box_left,
+            icon_top + icon_w + gap_icon_title,
+            box_w,
+            title_h
+        )
+        tf_t = title_tb.text_frame
+        tf_t.word_wrap = True
+        p_t = tf_t.paragraphs[0]
+        p_t.text = title_text
+        p_t.font.bold = True
+        p_t.font.size = Pt(18)
+        p_t.font.color.rgb = title_blue
+        p_t.alignment = PP_ALIGN.CENTER
+
+        # --- 説明（中央・小さめ） ---
+        desc_tb = slide.shapes.add_textbox(
+            box_left,
+            desc_top,
+            box_w,
+            desc_h
+        )
+        tf_d = desc_tb.text_frame
+        tf_d.word_wrap = True
+
+        p_d = tf_d.paragraphs[0]
+        p_d.text = desc_text
+        p_d.font.size = Pt(11)
+        p_d.font.color.rgb = desc_gray
+        p_d.alignment = PP_ALIGN.CENTER
+
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN, MSO_VERTICAL_ANCHOR
+from pptx.enum.shapes import MSO_CONNECTOR
+from pptx.oxml.ns import qn
+
+def make_straight_arrow_connector_xml(connector, arrow_type="triangle", is_end=True):
+    """
+    コネクタのXMLを直接操作して矢印を付与する。
+    is_end=True なら headEnd（終点）、Falseなら tailEnd（始点）
+    """
+    sp_pr = connector.element.spPr
+
+    # <a:ln> を取得 or 作成
+    ln = None
+    try:
+        ln = sp_pr.ln  # 存在すれば取得
+    except Exception:
+        ln = None
+
+    if ln is None:
+        ln = OxmlElement("a:ln")
+        sp_pr.append(ln)
+
+    # headEnd / tailEnd
+    tag_name = "a:headEnd" if is_end else "a:tailEnd"
+
+    # 既存があれば削除
+    existing_end = ln.find(qn(tag_name))
+    if existing_end is not None:
+        ln.remove(existing_end)
+
+    # 追加
+    line_end = OxmlElement(tag_name)
+    line_end.set("type", arrow_type)  # 'triangle', 'arrow', 'stealth' 等
+
+    # サイズ指定したいなら有効化
+    # line_end.set("w", "med")     # sm / med / lg
+    # line_end.set("len", "med")   # sm / med / lg
+
+    ln.append(line_end)
+
+
+def _add_down_arrow(slide, x, y1, y2, color=RGBColor(190, 190, 190), width_pt=1.5):
+    """
+    縦の下向き矢印（終点矢印付きコネクタ）を追加
+    """
+    connector = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x, y1, x, y2)
+    connector.line.color.rgb = color
+    connector.line.width = Pt(width_pt)
+    make_straight_arrow_connector_xml(connector, arrow_type="triangle", is_end=False)  # 終点に矢印
+    return connector
+
+
+def create_steps_slide(slide, data, theme):
+    """
+    type: steps 用
+    data = {
+      "slide_title": str,
+      "takeaway": str,
+      "steps": [{"title": str, "description": str}, ...],
+    }
+    """
+    _create_title_and_takeaway(slide, data)
+
+    steps = data.get("steps", [])
+    if not steps:
+        return
+
+    n = len(steps)
+
+    slide_width = Inches(10)
+    slide_height = Inches(5.625)
+
+    start_y = Inches(1.5) if (data.get("takeaway", "") == "") else Inches(2.0)
+    bottom_margin = Inches(0.35)
+
+    # 左側フロー領域（右に吹き出し領域）
+    flow_left = Inches(0.5)
+    flow_width = Inches(9.0)
+
+    # 左：ステップ名 / 右：説明
+    title_col_w = Inches(2.4)
+    col_gap = Inches(0.25)
+    desc_left = flow_left + title_col_w + col_gap
+    desc_w = flow_width - title_col_w - col_gap
+
+    available_h = slide_height - start_y - bottom_margin
+    gap_y = Inches(0.22)  # 矢印のための間隔
+    step_h = (available_h - gap_y * (n - 1)) / n
+    if step_h > Inches(1.05):
+        step_h = Inches(1.05)
+
+    blue = RGBColor(0, 153, 204)
+    gray = RGBColor(120, 120, 120)
+    arrow_gray = RGBColor(190, 190, 190)
+
+    for i, s in enumerate(steps):
+        y = start_y + i * (step_h + gap_y)
+
+        # 左：ステップ名（青太字）
+        tbox = slide.shapes.add_textbox(flow_left, y, title_col_w, step_h)
+        tf = tbox.text_frame
+        tf.clear()
+        tf.word_wrap = True
+        tf.vertical_anchor = MSO_VERTICAL_ANCHOR.MIDDLE
+
+        p = tf.paragraphs[0]
+        p.text = s.get("title", "")
+        p.font.size = Pt(18)
+        p.font.bold = True
+        p.font.color.rgb = blue
+        p.alignment = PP_ALIGN.LEFT
+
+        # 右：説明（グレー）
+        dbox = slide.shapes.add_textbox(desc_left, y, desc_w, step_h)
+        dtf = dbox.text_frame
+        dtf.clear()
+        dtf.word_wrap = True
+        dtf.vertical_anchor = MSO_VERTICAL_ANCHOR.MIDDLE
+
+        dp = dtf.paragraphs[0]
+        dp.text = s.get("description", "")
+        dp.font.size = Pt(12)
+        dp.font.color.rgb = gray
+        dp.alignment = PP_ALIGN.LEFT
+
+        # 下向き矢印（最後以外）
+        if i < n - 1:
+            arrow_x = flow_left + Inches(0.35)  # 左カラム内の矢印位置
+            y1 = y + step_h - Inches(0.02)
+            y2 = y + step_h + gap_y - Inches(0.02)
+            _add_down_arrow(slide, int(arrow_x), int(y1), int(y2), color=arrow_gray, width_pt=1.5)
+
+
+
+def _create_title_and_takeaway(slide, data):
+    """
+    既存のタイトルとTakeaway (Subtitle/Body) を更新
+    ※テンプレのplaceholder構成に合わせて調整してください
+    """
+    if slide.shapes.title:
+        slide.shapes.title.text = data.get("slide_title", "")
+        for p in slide.shapes.title.text_frame.paragraphs:
+            p.font.size = Pt(24)
+            p.font.bold = True
+            p.alignment = PP_ALIGN.LEFT
+
+    if len(slide.placeholders) > 1:
+        takeaway_shape = slide.placeholders[1]
+        takeaway_shape.text = data.get("takeaway", "")
+        for p in takeaway_shape.text_frame.paragraphs:
+            p.font.size = Pt(12)
+            p.alignment = PP_ALIGN.LEFT
+
+
+def _add_rect(slide, x, y, w, h, fill_rgb, line_rgb=None):
+    shp = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, w, h)
+    shp.fill.solid()
+    shp.fill.fore_color.rgb = fill_rgb
+    if line_rgb is None:
+        shp.line.fill.background()  # 枠線なし
+    else:
+        shp.line.color.rgb = line_rgb
+        shp.line.width = Pt(1)
+    return shp
+
+
+def _add_textbox(slide, x, y, w, h, text, *, size=Pt(12), bold=False, color=RGBColor(0,0,0),
+                 align=PP_ALIGN.LEFT, valign=MSO_ANCHOR.MIDDLE):
+    tb = slide.shapes.add_textbox(x, y, w, h)
+    tf = tb.text_frame
+    tf.clear()
+    tf.word_wrap = True
+    tf.vertical_anchor = valign
+    p = tf.paragraphs[0]
+    p.text = text
+    p.font.size = size
+    p.font.bold = bold
+    p.font.color.rgb = color
+    p.alignment = align
+    return tb
+
+
+def _draw_group_panel(slide, group, x, y, w, h, *, bg_rgb, accent_rgb):
+    group_title = group.get("group_title", "")
+    items = group.get("list", []) or []
+
+    _add_rect(slide, x, y, w, h, fill_rgb=bg_rgb, line_rgb=None)
+
+    pad = Inches(0.20)
+    header_h = Inches(0.55)
+
+    _add_rect(slide, x, y, w, header_h, fill_rgb=accent_rgb, line_rgb=None)
+    _add_textbox(
+        slide, x + pad, y, w - 2 * pad, header_h,
+        group_title,
+        size=Pt(16), bold=True, color=RGBColor(255, 255, 255),
+        align=PP_ALIGN.CENTER
+    )
+
+    if not items:
+        return
+
+    list_top = y + header_h + pad
+    list_h = h - header_h - 2 * pad
+
+    gap = Inches(0.15)
+    n = len(items)
+    item_h = (list_h - gap * (n - 1)) / n
+    if item_h > Inches(1.1):
+        item_h = Inches(1.1)
+
+    item_w = w - 2 * pad
+    item_x = x + pad
+
+    text_inset = Inches(0.18)  # アイコンが無いので左余白だけ
+
+    for i, it in enumerate(items):
+        desc = it.get("description", "")
+        item_y = list_top + i * (item_h + gap)
+
+        # 白いカード
+        _add_rect(
+            slide, item_x, item_y, item_w, item_h,
+            fill_rgb=RGBColor(255, 255, 255),
+            line_rgb=RGBColor(230, 230, 230)
+        )
+
+        # テキスト（アイコン分のオフセット無しで左寄せ）
+        tx_x = item_x + text_inset
+        tx_w = item_w - 2 * text_inset
+        _add_textbox(
+            slide, tx_x, item_y, tx_w, item_h,
+            desc,
+            size=Pt(12), color=RGBColor(60, 60, 60),
+            align=PP_ALIGN.LEFT
+        )
+
+
+def create_before_after_slide(slide, data, theme):
+    """
+    data:
+      slide_title, takeaway,
+      group_left_side: {group_title, list:[{description}, ...]},
+      group_right_side: {group_title, list:[{description}, ...]}
+    """
+    _create_title_and_takeaway(slide, data)
+
+    slide_w = Inches(10)
+    slide_h = Inches(5.625)
+
+    # タイトル/Takeaway の有無で開始Yを変える（あなたの実装方針に合わせる）
+    start_y = Inches(2.0) if data.get("takeaway", "") else Inches(1.5)
+    bottom_margin = Inches(0.2)
+
+    margin_x = Inches(0.5)
+    gap_x = Inches(0.35)
+
+    col_w = (slide_w - 2 * margin_x - gap_x) / 2
+    col_h = slide_h - start_y - bottom_margin
+
+    left_x = margin_x
+    right_x = margin_x + col_w + gap_x
+    y = start_y
+
+    left_group = data.get("group_left_side", {}) or {}
+    right_group = data.get("group_right_side", {}) or {}
+
+    # 左（Before）: 青系
+    _draw_group_panel(
+        slide, left_group, left_x, y, col_w, col_h,
+        bg_rgb=RGBColor(225, 240, 255),      # 薄い水色
+        accent_rgb=RGBColor(45, 120, 200)    # 青
+    )
+
+    # 右（After）: 赤系
+    _draw_group_panel(
+        slide, right_group, right_x, y, col_w, col_h,
+        bg_rgb=RGBColor(255, 230, 230),      # 薄いピンク
+        accent_rgb=RGBColor(210, 70, 70)     # 赤
+    )
+
+    # 任意：中央に矢印を置きたい場合
+    arrow_w = Inches(0.35)
+    arrow_h = Inches(0.35)
+    arrow_x = margin_x + col_w + (gap_x - arrow_w) / 2
+    arrow_y = y + Inches(1.8)
+    _add_textbox(slide, arrow_x, arrow_y, arrow_w, arrow_h, "▶",
+                 size=Pt(20), bold=True, color=RGBColor(150,150,150),
+                 align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE)
+
+
+def _add_textbox(slide, x, y, w, h, text, *, size, bold=False, color=RGBColor(60,60,60),
+                 align=PP_ALIGN.LEFT, valign=MSO_ANCHOR.MIDDLE, font_name=None):
+    tb = slide.shapes.add_textbox(x, y, w, h)
+    tf = tb.text_frame
+    tf.clear()
+    tf.word_wrap = True
+    tf.vertical_anchor = valign
+    p = tf.paragraphs[0]
+    p.text = text
+    p.alignment = align
+    p.font.size = size
+    p.font.bold = bold
+    p.font.color.rgb = color
+    if font_name:
+        p.font.name = font_name
+    return tb
+
+def create_main_message_slide(slide, data, theme):
+    """
+    data = {
+        "slide_title": "改善結果",
+        "main_message": "10人から30人に増加",
+    }
+    """
+    
+    _create_title_and_takeaway(slide, data)
+    slide_w = Inches(10)
+    slide_h = Inches(5.625)
+    
+    top_h = Inches(1.2)
+    bottom_h = Inches(0.5)
+
+
+    # 中央：メインメッセージ（大きく・中央揃え）
+    center_y = top_h
+    center_h = slide_h - top_h - bottom_h
+    _add_textbox(
+        slide,
+        Inches(1.0), center_y,
+        slide_w - Inches(2.0), center_h,
+        data.get("main_message", ""),
+        size=Pt(44), bold=True,
+        color=RGBColor(70, 70, 70),
+        align=PP_ALIGN.CENTER,
+        valign=MSO_ANCHOR.MIDDLE,
+        # font_name="Yu Gothic"
+    )
+
+
+
+
+if __name__ == "__main__":
+    theme = SlideTheme()
+    prs = Presentation("./template2.pptx")
+
+    slide_contents = [
+{
+"slide_type": "main_message",
+"slide_title": "長期記憶エージェント",
+"main_message": "ステートレスなLLMに永続メモリを足し、学習・適応するAI助手を構築する"
+},
+{
+"slide_type": "comparison",
+"slide_title": "ステートレスの壁",
+"takeaway": "長期記憶を実装すると、エージェントは一貫性と改善能力を獲得できる",
+"group_left_side": {
+"group_title": "メモリなし",
+"list": [
+{
+"description": "各会話を独立扱いし、文脈が積み上がらない"
+},
+{
+"description": "好み・事実を覚えられず、パーソナライズが弱い"
+},
+{
+"description": "成功例や失敗から学べず、改善が進まない"
+}
+]
+},
+"group_right_side": {
+"group_title": "長期記憶あり",
+"list": [
+{
+"description": "履歴を保持・想起し、長期の文脈で判断できる"
+},
+{
+"description": "ユーザー固有の事実/好みを学習して反映できる"
+},
+{
+"description": "フィードバックでルールや戦略を更新できる"
+}
+]
+}
+},
+{
+"slide_type": "listup_with_icon",
+"slide_title": "長期記憶の価値",
+"takeaway": "記憶があると個別最適・経験学習・行動適応が成立する",
+"list": [
+{
+"icon": "person",
+"title": "パーソナライズ",
+"description": "ユーザー固有の事実や好みを保持し、応答に反映する"
+},
+{
+"icon": "trophy",
+"title": "経験から学習",
+"description": "過去の成功例を想起し、同型タスクの精度を上げる"
+},
+{
+"icon": "repeat",
+"title": "行動の適応",
+"description": "結果やフィードバックで内部ルール/手順を更新する"
+}
+]
+},
+{
+"slide_type": "table",
+"slide_title": "3つの記憶",
+"takeaway": "意味・エピソード・手続きの分業で学習を整理する",
+"table": [
+[
+"種類",
+"主な内容",
+"使いどころ"
+],
+[
+"意味記憶",
+"ユーザーの事実・嗜好など",
+"返信生成時の前提/参照"
+],
+[
+"エピソード記憶",
+"過去の具体例・やり取り",
+"類似ケースの判断材料"
+],
+[
+"手続き記憶",
+"ルール/方針/運用手順",
+"分類・行動選択の指針"
+]
+]
+},
+{
+"slide_type": "listup_with_icon",
+"slide_title": "メール助手の機能",
+"takeaway": "トリアージと返信を、記憶によって継続的に改善する",
+"list": [
+{
+"icon": "data_table",
+"title": "自動トリアージ",
+"description": "学習したルールと過去例でメールを分類（無視/通知/返信など）"
+},
+{
+"icon": "mail",
+"title": "文脈ある返信",
+"description": "ツール活用と記憶参照で、状況に合う返信を作成する"
+},
+{
+"icon": "trending_up",
+"title": "適応学習",
+"description": "メモリ統合で戦略を更新し、精度と一貫性を高める"
+}
+]
+},
+{
+"slide_type": "listup",
+"slide_title": "アーキ構成",
+"takeaway": "LangGraphが状態遷移とモジュール連携を制御し、記憶で賢さを積み上げる",
+"list": [
+{
+"title": "トリアージ（ルーター）",
+"description": "手続き記憶のルール＋エピソード例で受信メールを分類する入口"
+},
+{
+"title": "応答エージェント",
+"description": "返信が必要なメールを処理し、意味記憶を参照/更新しながら返信生成"
+},
+{
+"title": "メモリストア",
+"description": "3種メモリの永続保存（例: ベクトルDB/pgvector等の選択肢）"
+},
+{
+"title": "LangGraphワークフロー",
+"description": "モジュール間の制御フロー（分岐・ループ）と状態管理を担う"
+},
+{
+"title": "プロンプト最適化",
+"description": "履歴とフィードバックを分析し、手続き記憶のシステムプロンプトを改良"
+}
+]
+},
+{
+"slide_type": "steps",
+"slide_title": "ワークフロー",
+"takeaway": "受信→分類→行動→学習の循環で、長期的に賢くなる",
+"steps": [
+{
+"title": "受信",
+"description": "メールを入力として取り込む"
+},
+{
+"title": "分類",
+"description": "ルール（手続き）と例（エピソード）で無視/通知/返信を決める"
+},
+{
+"title": "返信判断",
+"description": "返信が必要なものだけ応答エージェントへ渡す"
+},
+{
+"title": "記憶参照・更新",
+"description": "意味記憶を参照し、必要なら新情報を保存する"
+},
+{
+"title": "ツール実行",
+"description": "メール作成やカレンダー確認などの外部ツールを利用する"
+},
+{
+"title": "改善",
+"description": "結果/フィードバックを基に、ルールやプロンプトを更新する"
+}
+]
+},
+{
+"slide_type": "listup",
+"slide_title": "主要技術",
+"takeaway": "LangChain周辺ツールで、状態管理・ツール実行・メモリ運用を統合する",
+"list": [
+{
+"title": "LangGraph",
+"description": "ステートフルなワークフローを定義し、分岐・ループ・状態遷移を扱う"
+},
+{
+"title": "LangChain",
+"description": "ツール抽象化やReAct実装（create_react_agent等）の土台を提供"
+},
+{
+"title": "LangMem",
+"description": "メモリ管理/検索ツールやプロンプト最適化ツール群を提供"
+},
+{
+"title": "LLM（例: Azure OpenAI）",
+"description": "自然言語理解・生成のコアとして利用"
+},
+{
+"title": "Pydantic",
+"description": "データ検証と構造化出力の定義に利用"
+}
+]
+}
+]
+
+
+    for content in slide_contents:
+        slide_type = content.get("slide_type")
+        slide = prs.slides.add_slide(prs.slide_layouts[2])  # タイトル+本文など、テンプレに合わせて変更
+
+        if slide_type == "main_message":
+            create_main_message_slide(slide, content, theme)
+        elif slide_type == "steps":
+            create_steps_slide(slide, content, theme)
+        elif slide_type == "comparison":
+            create_before_after_slide(slide, content, theme)
+        elif slide_type == "table":
+            create_table(slide, content, theme)
+        elif slide_type == "listup":
+            create_listup_slide(slide, content, theme)
+        elif slide_type == "listup_with_icon":
+            create_listup_with_icon_slide(slide, content, theme)
+        else:
+            print(f"不明なスライドタイプ: {slide_type}")
+
+
+#     slide = prs.slides.add_slide(prs.slide_layouts[2])
+    
+#     data = {
+#         "slide_title": "サンプル表タイトル",
+#         "takeaway": "これはサンプルのリード文です。",   
+#         "table": [["row1", "row2", "row3"], 
+#                       ["col11", "col12", "col13"],
+#                      ["col21", "col22", "col23"]]}
+#     create_refined_table(slide, data, colors)
+    
+    
+#     slide = prs.slides.add_slide(prs.slide_layouts[2])
+
+#     data = {
+#         "slide_title": "時間を大切にする",
+#         "takeaway": "デザイナーとエンジニアの時間を大切にするという考え方のもと、以下のルール・仕組みで日々の業務を行っています。",
+#         "list": [
+#             {"title": "定例ミーティングなし", "description": "定例ミーティングの代わりに定例報告にてテキストで進捗報告。\n相談事項がある場合のみ各人がミーティングを設定することで、「ものづくり」職の時間を確保。"},
+#             {"title": "定量・定性での情報伝達", "description": "商談・ヒアリングMTGを録画で残し、かつ議事録やプロジェクト詳細をテキストで書き、\n情報を受け渡しすることで、認識のズレや責任転嫁を防いでいます。"},
+#             {"title": "制作はチェックシートでしっかり評価", "description": "曖昧な評価制度ではなく、プロジェクト制作物を点数で評価し、報酬面にも反映します。"},
+#             {"title": "タスクのリマインドはすべて自動化", "description": "納期や締切などのスケジュールは自動でSlackに通知が来るようになっており、\nプロジェクト管理の工数をできるだけ削減しています。"},
+#             {"title": "オンボーディングリスト完備", "description": "「入社後アンケート」や「参画後オンボーディングリスト」を用意しており、\n入社・参画後にだれの時間の無駄にしないようにしています。"}
+#         ]
+#     }
+
+#     # 関数実行
+#     create_listup_slide(slide, data)
+    
+#     slide = prs.slides.add_slide(prs.slide_layouts[2])
+    
+#     data = {
+#   "slide_title": "ご契約の流れ",
+#   "takeaway": "",
+#   "steps": [
+#     {"title": "お問い合わせ", "description": "お問い合わせフォームよりお気軽にご連絡ください。"},
+#     {"title": "ヒアリング・ご提案", "description": "約1時間のヒアリングを実施、提供内容・料金をご提案します。"},
+#     {"title": "ご契約", "description": "契約書の締結後、スケジュールと改善フローをご案内します。"},
+#     {"title": "戦略理解・企画立案", "description": "活用場面とマーケティング戦略を踏まえ、コンテンツ案をご提案します。"},
+#     {"title": "資料作成・調整", "description": "サービス紹介資料・営業資料を中心に作成と改善を行います。"},
+#     {"title": "ご納品", "description": "最終稿をご確認頂き、問題なければご納品となります。"}
+#   ],
+# }
+#     create_steps_slide(slide, data)
+
+#     data = {
+#         "slide_title": "解決法",
+#         "takeaway": "従来の資金提供型支援から、スキル提供型支援へとシフトすることで、より効果的な支援を実現します。",
+#         "group_left_side": {
+#             "group_title": "Before",
+#             "list": [{"description": "支援方法は資金提供のみ"}, {"description": "支援者にスポットライトが当たりにくい"}, {"description": "発信者と支援者、支援者同士のつながりが希薄"}],
+#         },
+#         "group_right_side": {
+#             "group_title": "After",
+#             "list": [{"description": "スキルによる支援手段により成功率アップ"}, {"description": "支援者への信頼スコアを付与することで貢献を可視化"}, {"description": "支援者承認機能により繋がりたい人と繋がれる"}],
+#         },
+#     }
+
+#     slide = prs.slides.add_slide(prs.slide_layouts[2])  # タイトル+本文など、テンプレに合わせて変更
+
+#     create_before_after_slide(slide, data)
+    
+#     data = { 
+#             "slide_title": "改善結果", 
+#             "main_message": "10人から30人に増加"
+#     }
+    
+#     slide = prs.slides.add_slide(prs.slide_layouts[2])  # タイトル+本文など、テンプレに合わせて変更
+#     create_main_message_slide(slide, data)
+
+
+    prs.save('c4.pptx')
+    
+
+
+# あなたは資料作成の編集者です。以下の【入力】を読み、内容を「複数枚のスライド」に分割して要点化し、スライドJSONの配列として出力してください。
+# 各スライドは次の6つの形式のうち 最も適切なものを1つ選んで表現してください。
+
+# ## 重要ルール
+
+# * 1要素＝スライド1枚
+# * 各スライドは 6形式のどれか1つに必ず一致させる（混在OK、同一スライド内で混ぜない）
+# * 出力は **JSONのみ**（前後に解説文やMarkdownを付けない）
+# * **キー名はテンプレ通り**（余計なキーを追加しない）
+# * 文章は日本語。冗長にせず、スライドで読める長さに圧縮
+# * `slide_title` は短く具体的に（目安：〜14文字程度）
+# * `takeaway` は1文で「このスライドの結論/主張」
+# * `description` は長くても2行程度（改行 `\n` は必要なら可）
+# * `steps` / `list` は **最大6個**まで（多い場合は統合して減らす）
+# * `table` はヘッダー行 + 2〜5行程度を目安に整形（不足情報は推測で捏造しない。曖昧なら抽象化して埋める）
+
+
+# ## 形式の選び方（各スライドごと）
+
+# * **問いの投げかけ・結果の一言**が主役 → **形式①**
+# * **手順・フロー・工程**が主役 → **形式②**
+# * **方針/ルール/特徴**など複数のポイント列挙 （列挙数が2~6個で説明が長い場合）→ **形式③**
+# * **方針/ルール/特徴**など複数のポイントをアイコンと共に列挙 (列挙数が2~4個で説明が短い場合) → **形式④**
+# * **比較表/一覧表/マトリクス**など表が最適 → **形式⑤**
+# * **Before/After、現状/理想、課題/解決**の対比が主役 → **形式⑥**
+
+# ---
+
+# ## 出力テンプレ（配列。中身は各スライドで下記5種のどれか）
+
+# ### 形式①（問いの投げかけ・結果の一言）
+
+# ```json
+# {
+#   "slide_type": "main_message", 
+#   "slide_title": "",
+#   "main_message": ""
+# }
+# ```
+
+# ### 形式②（手順・フロー）
+
+# ```json
+# {
+#   "slide_type": "steps", 
+#   "slide_title": "",
+#   "takeaway": "",
+#   "steps": [
+#     {"title": "", "description": ""},
+#     {"title": "", "description": ""}
+#   ]
+# }
+# ```
+
+# ### 形式③（箇条書き＋説明）
+
+# ```json
+# {
+#   "slide_type": "listup", 
+#   "slide_title": "",
+#   "takeaway": "",
+#   "list": [
+#     {"title": "", "description": ""},
+#     {"title": "", "description": ""}
+#   ]
+# }
+# ```
+
+# ### 形式④（アイコン＋箇条書き＋説明）
+
+# ```json
+# {
+#   "slide_type": "listup_with_icon",
+#   "slide_title": "長期憶の価値",
+#   "takeaway": "",
+#   "list": [
+#     {
+#       "icon": "",
+#       "title": "",
+#       "description": ""
+#     },
+#     {
+#       "icon": "",
+#       "title": "",
+#       "description": ""
+#     },
+#   ]
+# }
+# ```
+
+# iconは以下から選択 
+# ['balance', 'browse_activity', 'buildings', 'calendar_month', 'chat', 'check_circle', 'close', 'computer', 'construction', 'data_table', 'delete', 'description', 'desktop_cloud', 'directions_car', 'directions_run', 'docs', 'exclamation', 'groups', 'hearing', 'hourglass', 'image', 'key', 'lightbulb', 'mail', 'memory', 'mic', 'mood_bad', 'movie', 'neurology', 'paid', 'person', 'question_mark', 'repeat', 'schedule', 'search_check_2', 'security', 'sentiment_neutral', 'sentiment_satisfied', 'settings', 'star_half', 'target', 'task', 'thumb_up', 'trending_down', 'trending_flat', 'trending_up', 'trophy', 'videocam', 'wifi', 'work']
+
+# ### 形式⑤（表）
+
+# ```json
+# {
+#   "slide_type": "table", 
+#   "slide_title": "",
+#   "takeaway": "",
+#   "table": [
+#     ["", "", ""],
+#     ["", "", ""],
+#     ["", "", ""]
+#   ]
+# }
+# ```
+
+# ### 形式⑥（対比）
+
+# ```json
+# {
+#   "slide_type": "comparison",
+#   "slide_title": "",
+#   "takeaway": "",
+#   "group_left_side": {
+#     "group_title": "",
+#     "list": [{"description": ""}, {"description": ""}]
+#   },
+#   "group_right_side": {
+#     "group_title": "",
+#     "list": [{"description": ""}, {"description": ""}]
+#   }
+# }
+# ```
+# ---
+# ## 入力
+
